@@ -175,6 +175,7 @@ export default function Configurator({ settings, initialCategory }: { settings: 
             <FurnitureStage
               modelId={modelId}
               scale={category.sceneScale}
+              dirty={cur.heavy}
               showFaces={characters.showFaces}
               reducedMotion={reduced}
               waveSignal={waveSignal}

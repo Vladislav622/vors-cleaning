@@ -3,6 +3,18 @@ import { useFrame, type ThreeEvent } from "@react-three/fiber";
 import { useGLTF } from "@react-three/drei";
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
+import { paintStains } from "./stains";
+
+const STAIN_SIZE = 512;
+const APPEAR_S = 0.38; // появление новой модели
+const LEAVE_S = 0.18; // уход старой модели
+
+const smooth = (x: number) => x * x * (3 - 2 * x);
+/** Лёгкий «перелёт» в конце появления */
+const easeOutBack = (x: number) => {
+  const c1 = 1.4, c3 = c1 + 1;
+  return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+};
 
 export const modelUrl = (id: string) => `/models/${id}.glb`;
 
@@ -69,6 +81,10 @@ interface Props {
   id: string;
   scale: number;
   leaving: boolean;
+  /** Ждать, пока предыдущая модель уйдёт, и только потом появляться */
+  hold?: boolean;
+  /** Показать пятна на обивке (сильные загрязнения) */
+  dirty?: boolean;
   showFaces: boolean;
   reducedMotion: boolean;
   waveSignal: number;
@@ -78,10 +94,49 @@ interface Props {
   anchorRef?: React.MutableRefObject<THREE.Vector3 | null>;
 }
 
-export function FurnitureModel({ id, scale, leaving, showFaces, reducedMotion, waveSignal, onGone, onReady, onTap, anchorRef }: Props) {
+export function FurnitureModel({ id, scale, leaving, hold = false, dirty = false, showFaces, reducedMotion, waveSignal, onGone, onReady, onTap, anchorRef }: Props) {
   const rig = useRig(id);
   const group = useRef<THREE.Group>(null);
-  const appear = useRef(reducedMotion ? 1 : 0);
+  // 0..1: насколько модель «на сцене»; при появлении растёт, при уходе падает
+  const vis = useRef(0);
+  const dirtK = useRef(dirty ? 1 : 0);
+  const stainMeshes = useRef<THREE.Mesh[]>([]);
+
+  // Слой пятен поверх обивки: рисуем один раз на модель, показываем/скрываем прозрачностью
+  const stains = useMemo(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = STAIN_SIZE;
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.flipY = false; // как у текстур glTF
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshStandardMaterial({ map: tex, transparent: true, opacity: 0, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, roughness: 1 });
+    return { canvas, tex, mat, ctx: canvas.getContext("2d")! };
+  }, []);
+
+  useLayoutEffect(() => {
+    rig.root.updateMatrixWorld(true);
+    const overlays = rig.upholstery.map((m) => {
+      const o = new THREE.Mesh(m.geometry, stains.mat);
+      o.raycast = () => {}; // касания считаем по самой обивке
+      o.renderOrder = 2;
+      o.visible = false;
+      m.add(o);
+      return o;
+    });
+    stains.ctx.clearRect(0, 0, STAIN_SIZE, STAIN_SIZE);
+    paintStains(stains.ctx, rig.upholstery, 9, STAIN_SIZE);
+    stains.tex.needsUpdate = true;
+    stainMeshes.current = overlays;
+    return () => {
+      overlays.forEach((o) => o.removeFromParent());
+      stainMeshes.current = [];
+    };
+  }, [rig, stains]);
+
+  useEffect(() => () => {
+    stains.tex.dispose();
+    stains.mat.dispose();
+  }, [stains]);
   const blink = useRef({ next: 1.5 + Math.random() * 3, t: -1 });
   const wave = useRef({ until: 0, start: 0 });
   const gone = useRef(false);
@@ -108,16 +163,28 @@ export function FurnitureModel({ id, scale, leaving, showFaces, reducedMotion, w
     const g = group.current;
     if (!g) return;
     const now = state.clock.elapsedTime;
-    const target = leaving ? 0 : 1;
-    if (reducedMotion) appear.current = target;
-    else appear.current += (target - appear.current) * Math.min(1, dt * (leaving ? 14 : 9));
-    const a = appear.current;
-    const s = scale * (leaving ? 0.7 + 0.3 * a : 0.86 + 0.14 * a);
+    const step = Math.min(dt, 1 / 20); // после паузы вкладки не перескакиваем анимацию
+    // Смена модели анимируется всегда (короткое плавное появление/уход).
+    // При «уменьшении движения» без перелёта и смещения — только мягкое масштабирование.
+    if (leaving) vis.current = Math.max(0, vis.current - step / LEAVE_S);
+    else if (!hold) vis.current = Math.min(1, vis.current + step / APPEAR_S);
+    const v = vis.current;
+    const k = leaving || reducedMotion ? smooth(v) : easeOutBack(v);
+    const s = scale * Math.max(0, k);
     const breathe = reducedMotion ? 0 : Math.sin(now * 1.6) * 0.006;
     g.scale.set(s, s * (1 + breathe), s);
-    g.position.y = leaving ? -0.15 * (1 - a) : -0.06 * (1 - a);
-    g.visible = a > 0.02;
-    if (leaving && a < 0.03 && !gone.current) {
+    g.position.y = reducedMotion ? 0 : leaving ? -0.08 * (1 - v) : 0.05 * (1 - v);
+    g.visible = s > 0.002;
+
+    // пятна проявляются и исчезают за ~0.3 с
+    const dTarget = dirty ? 1 : 0;
+    dirtK.current += (dTarget - dirtK.current) * Math.min(1, dt * 10);
+    if (Math.abs(dirtK.current - dTarget) < 0.01) dirtK.current = dTarget;
+    stains.mat.opacity = dirtK.current;
+    const showStains = dirtK.current > 0.01;
+    stainMeshes.current.forEach((o) => (o.visible = showStains));
+
+    if (leaving && v <= 0 && !gone.current) {
       gone.current = true;
       onGone?.();
     }

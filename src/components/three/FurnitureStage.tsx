@@ -10,6 +10,7 @@ import { FurnitureModel, modelUrl } from "./FurnitureModel";
 export interface StageProps {
   modelId: string;
   scale: number;
+  dirty: boolean;
   showFaces: boolean;
   reducedMotion: boolean;
   waveSignal: number;
@@ -51,6 +52,8 @@ function Swapper(p: Omit<StageProps, "bubbleRef" | "containerRef" | "resetSignal
   // на узких экранах уменьшаем модель, чтобы она целиком помещалась в кадр
   const aspect = useThree((st) => st.size.width / Math.max(1, st.size.height));
   const fit = Math.min(1, Math.max(0.55, aspect / 1.3));
+  // новая модель ждёт, пока старая полностью уйдёт, — без наложения двух предметов
+  const someoneLeaving = slots.some((s) => s.leaving);
   return (
     <>
       {slots.map((s) => (
@@ -59,6 +62,8 @@ function Swapper(p: Omit<StageProps, "bubbleRef" | "containerRef" | "resetSignal
           id={s.id}
           scale={p.scale * fit}
           leaving={s.leaving}
+          hold={!s.leaving && someoneLeaving}
+          dirty={p.dirty}
           showFaces={p.showFaces}
           reducedMotion={p.reducedMotion}
           waveSignal={s.leaving ? 0 : p.waveSignal}
@@ -176,7 +181,7 @@ export default function FurnitureStage(props: StageProps & { fallback: (retry: (
       <Canvas
         key={attempt}
         dpr={[1, 1.75]}
-        frameloop={!props.active ? "never" : props.reducedMotion ? "demand" : "always"}
+        frameloop={props.active ? "always" : "never"}
         camera={{ position: CAM_POS.toArray(), fov: 30, near: 0.1, far: 50 }}
         gl={{ antialias: true, alpha: true, powerPreference: "low-power" }}
         onCreated={({ gl }) => {
@@ -199,6 +204,7 @@ export default function FurnitureStage(props: StageProps & { fallback: (retry: (
           <Swapper
             modelId={props.modelId}
             scale={props.scale}
+            dirty={props.dirty}
             showFaces={props.showFaces}
             reducedMotion={props.reducedMotion}
             waveSignal={props.waveSignal}
